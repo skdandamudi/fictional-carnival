@@ -1,21 +1,6 @@
-variable "aws_region" {
-  description = "AWS region"
+variable "cluster_name" {
+  description = "Name of the EKS cluster"
   type        = string
-}
-
-variable "environment" {
-  description = "Deployment environment (dev, staging, prod)"
-  type        = string
-  validation {
-    condition     = contains(["dev", "staging", "prod"], var.environment)
-    error_message = "Environment must be one of: dev, staging, prod."
-  }
-}
-
-variable "project_name" {
-  description = "Optional project name inserted into the cluster name. When set, the cluster is named {environment}-{project_name}-eks (e.g. prod-sharedservices-eks). When empty, the cluster is named {environment}-eks."
-  type        = string
-  default     = ""
 }
 
 variable "kubernetes_version" {
@@ -25,6 +10,10 @@ variable "kubernetes_version" {
 }
 
 # ── Compute mode ─────────────────────────────────────────────────────────────
+# Three valid combinations:
+#   automode=false  managed=true   → Managed only (self-managed addons + node group)
+#   automode=true   managed=false  → Auto Mode only (AWS manages everything)
+#   automode=true   managed=true   → Hybrid (Auto Mode + managed node group)
 
 variable "automode_enabled" {
   description = "Enable EKS Auto Mode (AWS manages compute, networking addons, and storage)"
@@ -45,26 +34,15 @@ variable "managed_node_group_enabled" {
 }
 
 variable "karpenter_enabled" {
-  description = "Provision Karpenter infrastructure (controller IAM role, instance profile, SQS queue, EventBridge rules)"
+  description = "Provision Karpenter infrastructure (controller IAM role, instance profile, SQS queue, EventBridge rules). Requires managed_node_group_enabled for bootstrap capacity."
   type        = bool
   default     = false
 }
 
-# ── Cluster access ────────────────────────────────────────────────────────────
-
-variable "access_entries" {
-  description = "Map of IAM principal ARN to EKS access configuration. Key is the IAM role/user ARN. When namespaces is empty the policy applies cluster-wide."
-  type = map(object({
-    access_policy_arn = string
-    namespaces        = optional(list(string), [])
-  }))
-  default = {}
-}
-
-# ── Networking ───────────────────────────────────────────────────────────────
+# ── Endpoint access ──────────────────────────────────────────────────────────
 
 variable "endpoint_public_access" {
-  description = "Whether the EKS API server endpoint is publicly accessible (set false for prod)"
+  description = "Whether the EKS API server endpoint is publicly accessible"
   type        = bool
   default     = false
 }
@@ -81,14 +59,35 @@ variable "private_access_cidrs" {
   default     = []
 }
 
-variable "vpc_tags" {
-  description = "Tags used to look up the VPC (e.g. { Name = \"dev-vpc\" }). Must match exactly one VPC."
-  type        = map(string)
+# ── Cluster access ────────────────────────────────────────────────────────────
+
+variable "access_entries" {
+  description = "Map of IAM principal ARN to EKS access configuration. Key is the IAM role/user ARN. When namespaces is empty the policy applies cluster-wide."
+  type = map(object({
+    access_policy_arn = string
+    namespaces        = optional(list(string), [])
+  }))
+  default = {}
 }
 
-variable "subnet_tags" {
-  description = "Tags used to filter subnets within the VPC (e.g. { Tier = \"private\" }). All matching subnets are used for the cluster and node groups."
-  type        = map(string)
+# ── Encryption ───────────────────────────────────────────────────────────────
+
+variable "cluster_encryption_kms_key_arn" {
+  description = "KMS key ARN for encrypting Kubernetes secrets at rest. Leave empty to skip."
+  type        = string
+  default     = ""
+}
+
+# ── Networking ───────────────────────────────────────────────────────────────
+
+variable "vpc_id" {
+  description = "ID of the VPC where the EKS cluster will be created"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "List of subnet IDs for the EKS cluster control plane and node groups"
+  type        = list(string)
 }
 
 # ── Node group (requires managed_node_group_enabled) ────────────────────────
@@ -100,39 +99,44 @@ variable "node_instance_types" {
 }
 
 variable "node_desired_size" {
-  description = "Desired number of nodes (ignored in Auto Mode)"
+  description = "Desired number of nodes"
   type        = number
   default     = 2
 }
 
 variable "node_min_size" {
-  description = "Minimum number of nodes (ignored in Auto Mode)"
+  description = "Minimum number of nodes"
   type        = number
   default     = 1
 }
 
 variable "node_max_size" {
-  description = "Maximum number of nodes (ignored in Auto Mode)"
+  description = "Maximum number of nodes"
   type        = number
   default     = 5
 }
 
 variable "node_disk_size" {
-  description = "Root EBS volume size in GiB for worker nodes (ignored in Auto Mode)"
+  description = "Root EBS volume size in GiB for worker nodes"
   type        = number
   default     = 50
 }
 
 variable "node_ami_type" {
-  description = "AMI type for the managed node group (ignored in Auto Mode)"
+  description = "AMI type for the managed node group (AL2023_x86_64_STANDARD, AL2_x86_64, BOTTLEROCKET_x86_64)"
   type        = string
   default     = "AL2023_x86_64_STANDARD"
 }
 
 # ── Additional node groups ───────────────────────────────────────────────────
+# Map of extra managed node groups created in addition to the default group
+# (aws_eks_node_group.this). Each entry yields one aws_eks_node_group sharing
+# the cluster's node IAM role, and — when Calico CNI mode is active — the
+# cluster's Calico launch template. Set subnet_ids to override the cluster
+# default subnets for that group.
 
 variable "additional_node_groups" {
-  description = "Map of additional managed node groups created alongside the default group. Each entry yields one EKS node group named \"$${cluster_name}-$${key}\" (or \"-$${key}-calico\" when Calico CNI launch template is active). See the eks-cluster module for object shape details."
+  description = "Map of additional managed node groups, keyed by short name (e.g. \"zscaler\"). Resulting EKS node group name is \"$${cluster_name}-$${key}\" (or \"-$${key}-calico\" when Calico CNI launch template is active)."
   type = map(object({
     instance_types = list(string)
     ami_type       = optional(string, "AL2023_x86_64_STANDARD")
@@ -150,6 +154,20 @@ variable "additional_node_groups" {
     subnet_ids = optional(list(string))
   }))
   default = {}
+  validation {
+    condition = alltrue([
+      for ng in var.additional_node_groups : alltrue([
+        for t in ng.taints : contains(["NO_SCHEDULE", "NO_EXECUTE", "PREFER_NO_SCHEDULE"], t.effect)
+      ])
+    ])
+    error_message = "taint.effect must be one of NO_SCHEDULE, NO_EXECUTE, PREFER_NO_SCHEDULE."
+  }
+  validation {
+    condition = alltrue([
+      for ng in var.additional_node_groups : contains(["ON_DEMAND", "SPOT"], ng.capacity_type)
+    ])
+    error_message = "capacity_type must be ON_DEMAND or SPOT."
+  }
 }
 
 # ── Control plane logging ────────────────────────────────────────────────────
@@ -172,6 +190,20 @@ variable "vpc_cni_prefix_delegation" {
   description = "Enable VPC CNI prefix delegation for higher pod density (ignored when Auto Mode is enabled)"
   type        = bool
   default     = true
+}
+
+# ── EBS CSI Driver ────────────────────────────────────────────────────────────
+
+variable "ebs_csi_driver_enabled" {
+  description = "Install the EBS CSI driver EKS addon with IRSA role for dynamic EBS volume provisioning"
+  type        = bool
+  default     = false
+}
+
+variable "ebs_csi_kms_key_arns" {
+  description = "List of KMS key ARNs the EBS CSI driver can use for encrypting/decrypting volumes. Leave null to skip KMS policy."
+  type        = list(string)
+  default     = null
 }
 
 # ── Calico CNI ────────────────────────────────────────────────────────────────
@@ -236,4 +268,12 @@ variable "calico_max_pods_per_node" {
   description = "Maximum pods per node when using Calico CNI mode. Overrides the default ENI-based limit since Calico manages its own IPAM. Set to 0 to skip the override. Only applies when calico_mode = 'cni'."
   type        = number
   default     = 110
+}
+
+# ── Tags ─────────────────────────────────────────────────────────────────────
+
+variable "tags" {
+  description = "Additional tags to apply to all resources"
+  type        = map(string)
+  default     = {}
 }
