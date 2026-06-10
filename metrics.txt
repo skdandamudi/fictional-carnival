@@ -1,20 +1,28 @@
-LB="app/my-alb/50dc6c495c0c9188"   # ARN suffix, see note below
+LB="app/my-alb/50dc6c495c0c9188"   # ARN suffix from describe-load-balancers
 REGION="us-east-1"
 
-for start in 2025-09-01 2025-10-01 2025-11-01 2025-12-01 2026-01-01; do
+printf "%-9s %16s %16s\n" "Month" "Requests" "Processed(GB)"
+printf "%-9s %16s %16s\n" "-------" "----------------" "----------------"
+
+for m in 01 02 03 04 05 06 07 08 09 10 11 12; do
+  start="2026-${m}-01"
   end=$(date -u -d "$start +1 month" +%Y-%m-%d)
-  for metric in RequestCount ProcessedBytes; do
-    sum=$(aws cloudwatch get-metric-statistics \
-      --region "$REGION" \
-      --namespace AWS/ApplicationELB \
-      --metric-name "$metric" \
-      --dimensions Name=LoadBalancer,Value="$LB" \
-      --start-time "${start}T00:00:00Z" \
-      --end-time "${end}T00:00:00Z" \
-      --period 86400 \
-      --statistics Sum \
-      --query 'Datapoints[].Sum' --output text \
-      | tr '\t' '\n' | awk '{s+=$1} END {printf "%.0f", s}')
-    echo "$start $metric $sum"
-  done
+
+  req=$(aws cloudwatch get-metric-statistics --region "$REGION" \
+    --namespace AWS/ApplicationELB --metric-name RequestCount \
+    --dimensions Name=LoadBalancer,Value="$LB" \
+    --start-time "${start}T00:00:00Z" --end-time "${end}T00:00:00Z" \
+    --period 86400 --statistics Sum \
+    --query 'Datapoints[].Sum' --output text \
+    | tr '\t' '\n' | awk '{s+=$1} END {printf "%.0f", s+0}')
+
+  gb=$(aws cloudwatch get-metric-statistics --region "$REGION" \
+    --namespace AWS/ApplicationELB --metric-name ProcessedBytes \
+    --dimensions Name=LoadBalancer,Value="$LB" \
+    --start-time "${start}T00:00:00Z" --end-time "${end}T00:00:00Z" \
+    --period 86400 --statistics Sum \
+    --query 'Datapoints[].Sum' --output text \
+    | tr '\t' '\n' | awk '{s+=$1} END {printf "%.2f", (s+0)/1024/1024/1024}')
+
+  printf "%-9s %16s %16s\n" "2026-${m}" "$req" "$gb"
 done
